@@ -1,0 +1,344 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width,initial-scale=1" />
+  <title>Simple Car Racing Game</title>
+  <style>
+    :root{--bg:#0b1620;--road:#2b2b2b;--lane:#444;--accent:#ffd166}
+    html,body{height:100%;margin:0;font-family:Inter,system-ui,Segoe UI,Roboto,'Helvetica Neue',Arial}
+    body{display:flex;align-items:center;justify-content:center;background:linear-gradient(180deg,#071021 0%, #0f2633 100%);color:#fff}
+    .wrap{width:100%;max-width:900px;padding:18px;box-sizing:border-box}
+    header{display:flex;align-items:center;justify-content:space-between;margin-bottom:10px}
+    h1{font-size:18px;margin:0}
+    .controls{display:flex;gap:8px;align-items:center}
+    button{background:var(--accent);border:none;padding:8px 12px;border-radius:8px;color:#111;font-weight:600;cursor:pointer}
+    canvas{display:block;width:100%;height:600px;border-radius:12px;box-shadow:0 10px 30px rgba(0,0,0,0.6)}
+    .hud{display:flex;gap:12px;align-items:center;margin-top:8px}
+    .note{font-size:13px;opacity:0.9}
+    .hint{font-size:13px;background:rgba(255,255,255,0.03);padding:8px;border-radius:8px}
+    @media (max-width:520px){canvas{height:480px}}
+  </style>
+</head>
+<body>
+  <div class="wrap">
+    <header>
+      <h1>Car Racing — Single File HTML Game</h1>
+      <div class="controls">
+        <button id="startBtn">Start / Restart</button>
+        <div class="note">Use ← → or A D to steer. Up to accelerate, Down to brake.</div>
+      </div>
+    </header>
+
+    <canvas id="game"></canvas>
+
+    <div class="hud">
+      <div class="hint">Score: <span id="score">0</span></div>
+      <div class="hint">Speed: <span id="speed">0</span></div>
+      <div class="hint">Best: <span id="best">0</span></div>
+      <div style="flex:1"></div>
+      <div class="note">Tap left/right on mobile to steer. Tap both sides to accelerate.</div>
+    </div>
+  </div>
+
+  <script>
+    // Simple car racing game using Canvas.
+    // Features: lane-based road, player's car, obstacles, score, speed, touch controls, restart.
+
+    const canvas = document.getElementById('game');
+    const ctx = canvas.getContext('2d');
+    const startBtn = document.getElementById('startBtn');
+    const scoreEl = document.getElementById('score');
+    const speedEl = document.getElementById('speed');
+    const bestEl = document.getElementById('best');
+
+    let width, height, roadX, roadW;
+    let animationId;
+    let lastTime = 0;
+
+    // Game state
+    const state = {
+      running: false,
+      score: 0,
+      best: Number(localStorage.getItem('car_best') || 0),
+      speed: 3, // base speed
+      levelSpeed: 0,
+      obstacles: [],
+      spawnTimer: 0,
+      player: null,
+      keys: {},
+      touch: {left:false,right:false}
+    };
+
+    // Player car
+    function createPlayer(){
+      return {
+        w: 50,
+        h: 100,
+        x: 0, // relative to roadX
+        y: 0,
+        lane: 1
+      }
+    }
+
+    function resize(){
+      const ratio = devicePixelRatio || 1;
+      width = canvas.clientWidth;
+      height = canvas.clientHeight || 600;
+      canvas.width = Math.floor(width * ratio);
+      canvas.height = Math.floor(height * ratio);
+      ctx.setTransform(ratio,0,0,ratio,0,0);
+
+      // Road occupies middle 64% of width
+      roadW = Math.max(260, width * 0.64);
+      roadX = (width - roadW) / 2;
+
+      if(!state.player){
+        state.player = createPlayer();
+      }
+      // place player near bottom center lane
+      state.player.y = height - state.player.h - 20;
+      state.player.x = roadX + roadW/3 - state.player.w/2;
+    }
+
+    window.addEventListener('resize', resize);
+
+    function startGame(){
+      cancelAnimationFrame(animationId);
+      state.running = true;
+      state.score = 0;
+      state.speed = 3;
+      state.levelSpeed = 0;
+      state.obstacles = [];
+      state.spawnTimer = 0;
+      state.player = createPlayer();
+      state.player.y = height - state.player.h - 20;
+      state.player.lane = 1; // 0 left,1 center,2 right
+      updateHUD();
+      lastTime = performance.now();
+      animationId = requestAnimationFrame(loop);
+    }
+
+    startBtn.addEventListener('click', startGame);
+
+    // Input handling
+    window.addEventListener('keydown', e => {
+      state.keys[e.key.toLowerCase()] = true;
+      // prevent page scroll when arrows
+      if(['arrowup','arrowdown','arrowleft','arrowright'].includes(e.key.toLowerCase())) e.preventDefault();
+    });
+    window.addEventListener('keyup', e => state.keys[e.key.toLowerCase()] = false);
+
+    // Touch controls: split screen
+    canvas.addEventListener('touchstart', (ev) => {
+      ev.preventDefault();
+      for(const t of ev.changedTouches){
+        const rect = canvas.getBoundingClientRect();
+        const x = t.clientX - rect.left;
+        if(x < rect.width/2) state.touch.left = true; else state.touch.right = true;
+      }
+    }, {passive:false});
+    canvas.addEventListener('touchend', (ev) => {
+      ev.preventDefault();
+      state.touch.left = false; state.touch.right = false;
+    }, {passive:false});
+
+    // Game loop
+    function loop(now){
+      const dt = Math.min(40, now - lastTime) / 1000; // limit dt
+      lastTime = now;
+
+      update(dt);
+      render();
+
+      if(state.running) animationId = requestAnimationFrame(loop);
+    }
+
+    function update(dt){
+      // controls
+      const left = state.keys['arrowleft'] || state.keys['a'] || state.touch.left;
+      const right = state.keys['arrowright'] || state.keys['d'] || state.touch.right;
+      const up = state.keys['arrowup'] || state.keys['w'];
+      const down = state.keys['arrowdown'] || state.keys['s'];
+
+      // speed control
+      if(up) state.speed = Math.min(12, state.speed + 8*dt);
+      else if(down) state.speed = Math.max(1.2, state.speed - 6*dt);
+      else state.speed = Math.max(3, state.speed - 1*dt);
+
+      // lane steering - smooth
+      const laneCount = 3;
+      const laneWidth = roadW / laneCount;
+      const targetLane = (() => {
+        let l = state.player.lane;
+        if(left) l = Math.max(0, l - 1);
+        if(right) l = Math.min(laneCount-1, l + 1);
+        return l;
+      })();
+      // only change lane on keypress edge - allow holding continuous by resetting keys
+      if(left && !state._leftLocked){ state.player.lane = Math.max(0,state.player.lane-1); state._leftLocked=true; }
+      if(!left) state._leftLocked=false;
+      if(right && !state._rightLocked){ state.player.lane = Math.min(2,state.player.lane+1); state._rightLocked=true; }
+      if(!right) state._rightLocked=false;
+
+      // move player x toward lane center
+      const targetX = roadX + state.player.lane * laneWidth + laneWidth/2 - state.player.w/2;
+      state.player.x += (targetX - state.player.x) * 10 * dt;
+
+      // spawn obstacles
+      state.spawnTimer -= dt * (0.8 + state.speed/6);
+      if(state.spawnTimer <= 0){
+        spawnObstacle();
+        state.spawnTimer = 0.8 + Math.random() * Math.max(0.6, 1.6 - state.speed/6);
+      }
+
+      // update obstacles
+      for(let i = state.obstacles.length-1; i>=0; i--){
+        const ob = state.obstacles[i];
+        ob.y += (state.speed + ob.speed) * dt * 200; // pixels per sec
+        // simple collision
+        if(rectIntersect(ob.x, ob.y, ob.w, ob.h, state.player.x, state.player.y, state.player.w, state.player.h)){
+          // crash!
+          endGame();
+        }
+        if(ob.y > height + 200) state.obstacles.splice(i,1);
+      }
+
+      // score increases with distance
+      state.score += dt * state.speed * 20;
+      updateHUD();
+
+      // gradually increase difficulty
+      state.levelSpeed += dt * 0.02;
+    }
+
+    function updateHUD(){
+      scoreEl.textContent = Math.floor(state.score);
+      speedEl.textContent = state.speed.toFixed(1);
+      bestEl.textContent = state.best;
+    }
+
+    function spawnObstacle(){
+      const laneCount = 3;
+      const laneWidth = roadW / laneCount;
+      const lane = Math.floor(Math.random()*laneCount);
+      const w = laneWidth * (0.5 + Math.random()*0.3);
+      const h = 60 + Math.random()*60;
+      const x = roadX + lane * laneWidth + (laneWidth - w)/2;
+      const y = -120 - Math.random()*200;
+      state.obstacles.push({x,y,w,h,speed: Math.random()*1.2 + state.levelSpeed});
+    }
+
+    function rectIntersect(x1,y1,w1,h1,x2,y2,w2,h2){
+      return !(x2 > x1 + w1 || x2 + w2 < x1 || y2 > y1 + h1 || y2 + h2 < y1);
+    }
+
+    function endGame(){
+      state.running = false;
+      cancelAnimationFrame(animationId);
+      if(Math.floor(state.score) > state.best){
+        state.best = Math.floor(state.score);
+        localStorage.setItem('car_best', state.best);
+      }
+      // show simple overlay
+      setTimeout(()=>{
+        const play = confirm('You crashed! Score: ' + Math.floor(state.score) + '\nPlay again?');
+        if(play) startGame();
+      }, 50);
+    }
+
+    // Rendering
+    function render(){
+      // clear
+      ctx.clearRect(0,0,width,height);
+
+      // background
+      ctx.fillStyle = '#071021';
+      ctx.fillRect(0,0,width,height);
+
+      // roadside
+      ctx.fillStyle = '#07303f';
+      ctx.fillRect(0,0,roadX, height);
+      ctx.fillRect(roadX+roadW,0,width-(roadX+roadW),height);
+
+      // road
+      roundRect(ctx, roadX, 0, roadW, height, 6);
+      ctx.fillStyle = '#222';
+      ctx.fill();
+
+      // lane markings
+      const lanes = 3;
+      const laneW = roadW / lanes;
+      ctx.strokeStyle = '#888';
+      ctx.lineWidth = 2;
+      for(let i=1;i<lanes;i++){
+        const x = roadX + i*laneW;
+        // dashed center lines
+        ctx.setLineDash([18,18]);
+        ctx.beginPath();
+        ctx.moveTo(x,0);
+        ctx.lineTo(x,height);
+        ctx.stroke();
+        ctx.setLineDash([]);
+      }
+
+      // draw obstacles
+      for(const ob of state.obstacles){
+        drawObstacle(ob);
+      }
+
+      // draw player car
+      drawPlayer();
+
+      // HUD on canvas (optional)
+      ctx.fillStyle = 'rgba(255,255,255,0.08)';
+      ctx.fillRect(10,10,150,56);
+      ctx.fillStyle = '#fff';
+      ctx.font = '14px system-ui';
+      ctx.fillText('Score: ' + Math.floor(state.score), 18, 30);
+      ctx.fillText('Speed: ' + state.speed.toFixed(1), 18, 50);
+    }
+
+    function drawPlayer(){
+      const p = state.player;
+      // car body
+      roundRect(ctx, p.x, p.y, p.w, p.h, 8);
+      ctx.fillStyle = '#ffd166'; ctx.fill();
+      // windows
+      ctx.fillStyle = 'rgba(0,0,0,0.25)';
+      roundRect(ctx, p.x+8, p.y+12, p.w-16, p.h*0.4, 4); ctx.fill();
+      // wheels
+      ctx.fillStyle = '#111';
+      ctx.fillRect(p.x+6, p.y+p.h-10, 12,6);
+      ctx.fillRect(p.x+p.w-18, p.y+p.h-10, 12,6);
+    }
+
+    function drawObstacle(ob){
+      roundRect(ctx, ob.x, ob.y, ob.w, ob.h, 6);
+      ctx.fillStyle = '#d7263d'; ctx.fill();
+      // small detailing
+      ctx.fillStyle = 'rgba(255,255,255,0.12)';
+      ctx.fillRect(ob.x+6, ob.y+10, ob.w-12, 12);
+    }
+
+    function roundRect(ctx,x,y,w,h,r){
+      ctx.beginPath();
+      ctx.moveTo(x+r,y);
+      ctx.arcTo(x+w,y,x+w,y+h,r);
+      ctx.arcTo(x+w,y+h,x,y+h,r);
+      ctx.arcTo(x,y+h,x,y,r);
+      ctx.arcTo(x,y,x+w,y,r);
+      ctx.closePath();
+    }
+
+    // initial resize then draw static screen
+    resize();
+    render();
+
+    // Helpful: if user never started, offer to press Start
+    // Auto-start on first click to help mobile
+    canvas.addEventListener('click', ()=>{ if(!state.running) startGame(); });
+
+  </script>
+</body>
+</html>
